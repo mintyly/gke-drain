@@ -1,0 +1,17 @@
+/bin/
+/gke-drain
+*.test
+*.out
+coverage.*
+/demo-plan.json
+live-plan.json
+live-run-plan.json
+live-run.txt
+live-events.txt
+live-events.jsonl
+.env
+.env.*
+credentials*.json
+application_default_credentials.json
+kubeconfig*
+.DS_Store
