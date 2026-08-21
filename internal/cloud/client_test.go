@@ -52,6 +52,25 @@ func fixturePod(name, node string) podJSON {
 	return p
 }
 
+func TestMIGURLCannotRedirectCredentials(t *testing.T) {
+	var calls atomic.Int32
+	c := fixtureClient(t, func(w http.ResponseWriter, r *http.Request) { calls.Add(1); t.Error("unsafe URL reached HTTP client") })
+	for _, raw := range []string{
+		"https://attacker.example/compute/v1/projects/demo/zones/us-central1-a/instanceGroupManagers/mig",
+		"http://compute.googleapis.com/compute/v1/projects/demo/zones/us-central1-a/instanceGroupManagers/mig",
+		"https://compute.googleapis.com/compute/v1/projects/other/zones/us-central1-a/instanceGroupManagers/mig",
+		"https://compute.googleapis.com/compute/v1/projects/demo/zones/us-central1-a/instanceGroupManagers/mig?token=1",
+		"https://compute.googleapis.com/compute/v1/projects/demo/zones/us-central1-a/instanceGroupManagers/%2e%2e",
+	} {
+		if _, err := c.group(context.Background(), raw); err == nil {
+			t.Errorf("accepted unsafe URL %q", raw)
+		}
+	}
+	if calls.Load() != 0 {
+		t.Fatal("made HTTP request for an unsafe URL")
+	}
+}
+
 func TestOAuthClientDoesNotFollowRedirect(t *testing.T) {
 	var leaked atomic.Int32
 	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { leaked.Add(1) }))
@@ -129,5 +148,17 @@ func TestCredentialsRefreshAfterRunCancellationButAPIRequestsStillCancel(t *test
 	}
 	if refreshes.Load() != 1 {
 		t.Fatal("canceled API request reached server")
+	}
+}
+
+func TestActiveOperationsFailClosedForUnknownTargets(t *testing.T) {
+	for _, target := range []string{"", "https://attacker.example/cluster", "https://container.googleapis.com/unrecognized", "https://container.googleapis.com/v1/projects/demo/locations/us-central1-a/clusters/demo/nodePools/workers"} {
+		c := fixtureClient(t, func(w http.ResponseWriter, r *http.Request) {
+			respond(t, w, map[string]any{"operations": []operationJSON{{Status: "RUNNING", TargetLink: target}}})
+		})
+		busy, err := c.activeOperations(context.Background())
+		if err != nil || !busy {
+			t.Errorf("unknown/selected target was not blocked: %q busy %v err %v", target, busy, err)
+		}
 	}
 }
