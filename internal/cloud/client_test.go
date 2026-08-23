@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -68,6 +69,16 @@ func TestMIGURLCannotRedirectCredentials(t *testing.T) {
 	}
 	if calls.Load() != 0 {
 		t.Fatal("made HTTP request for an unsafe URL")
+	}
+}
+
+func TestWorkloadsRejectControllerRecreation(t *testing.T) {
+	c := fixtureClient(t, func(w http.ResponseWriter, r *http.Request) {
+		respond(t, w, map[string]any{"metadata": map[string]string{"name": "web", "namespace": "default", "uid": "replacement-uid"}, "spec": map[string]int{"replicas": 2}, "status": map[string]int{"readyReplicas": 2}})
+	})
+	_, err := c.Workloads(context.Background(), []drain.Workload{{Kind: "ReplicaSet", Namespace: "default", Name: "web", UID: "original-uid"}})
+	if err == nil || !strings.Contains(err.Error(), "identity changed") {
+		t.Fatalf("controller replacement not rejected: %v", err)
 	}
 }
 
