@@ -53,6 +53,108 @@ func fixturePod(name, node string) podJSON {
 	return p
 }
 
+func TestSnapshotPaginatesAndMapsExactMIGMembership(t *testing.T) {
+	var nodePages, migPages, opPages, podPages atomic.Int32
+	c := fixtureClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/gke/" + testResource.ClusterPath():
+			respond(t, w, map[string]any{"id": "cluster-id", "status": "RUNNING", "locations": []string{"us-central1-a"}})
+		case "/gke/" + testResource.PoolPath():
+			respond(t, w, map[string]any{"name": "workers", "status": "RUNNING", "instanceGroupUrls": []string{"https://www.googleapis.com/compute/v1/projects/demo/zones/us-central1-a/instanceGroupManagers/mig"}})
+		case "/gke/projects/demo/locations/us-central1-a/operations":
+			opPages.Add(1)
+			if r.URL.Query().Get("pageToken") == "" {
+				respond(t, w, map[string]any{"operations": []any{}, "nextPageToken": "op/next+token"})
+			} else {
+				if r.URL.Query().Get("pageToken") != "op/next+token" {
+					t.Error("operation page token not preserved")
+				}
+				respond(t, w, map[string]any{"operations": []any{map[string]any{"status": "RUNNING", "targetLink": "https://container.googleapis.com/v1/projects/demo/zones/us-central1-a/clusters/unrelated"}}})
+			}
+		case "/compute/projects/demo/zones/us-central1-a/instanceGroupManagers/mig":
+			respond(t, w, map[string]any{"targetSize": 2, "status": map[string]any{"isStable": true}})
+		case "/compute/projects/demo/zones/us-central1-a/instanceGroupManagers/mig/listManagedInstances":
+			migPages.Add(1)
+			if r.Method != http.MethodPost {
+				t.Errorf("listManagedInstances method %s", r.Method)
+			}
+			name, token := "node-a", "mig/next+token"
+			if r.URL.Query().Get("pageToken") != "" {
+				name, token = "node-b", ""
+				if r.URL.Query().Get("pageToken") != "mig/next+token" {
+					t.Error("MIG page token not preserved")
+				}
+			}
+			respond(t, w, map[string]any{"managedInstances": []any{map[string]any{"instance": "https://compute.googleapis.com/compute/v1/projects/demo/zones/us-central1-a/instances/" + name, "currentAction": "NONE"}}, "nextPageToken": token})
+		case "/api/v1/nodes":
+			nodePages.Add(1)
+			if r.URL.Query().Get("labelSelector") != "cloud.google.com/gke-nodepool=workers" {
+				t.Error("wrong node pool selector")
+			}
+			name, token := "node-a", "nodes/next+token"
+			if r.URL.Query().Get("continue") != "" {
+				name, token = "node-b", ""
+			}
+			respond(t, w, map[string]any{"metadata": map[string]string{"continue": token}, "items": []nodeJSON{fixtureNode(name)}})
+		case "/api/v1/pods":
+			if r.URL.Query().Get("fieldSelector") == "spec.nodeName=node-b" {
+				respond(t, w, map[string]any{"items": []any{}})
+				return
+			}
+			if r.URL.Query().Get("fieldSelector") != "spec.nodeName=node-a" {
+				t.Error("wrong pod field selector")
+			}
+			podPages.Add(1)
+			if r.URL.Query().Get("continue") == "" {
+				respond(t, w, map[string]any{"metadata": map[string]string{"continue": "pods/next+token"}, "items": []podJSON{fixturePod("web-1", "node-a")}})
+			} else {
+				daemon := fixturePod("agent", "node-a")
+				daemon.Metadata.OwnerReferences[0].Kind = "DaemonSet"
+				respond(t, w, map[string]any{"items": []podJSON{daemon}})
+			}
+		case "/apis/apps/v1/namespaces/default/replicasets/web":
+			respond(t, w, map[string]any{"metadata": map[string]any{"name": "web", "namespace": "default", "uid": "rs-uid", "generation": 3}, "spec": map[string]any{"replicas": 2}, "status": map[string]any{"readyReplicas": 2, "observedGeneration": 3}})
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.String())
+			http.NotFound(w, r)
+		}
+	})
+	s, err := c.Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Busy || s.Autoscaling || s.Autopilot || len(s.Nodes) != 2 || len(s.Groups) != 1 || len(s.Pods) != 2 || len(s.Workloads) != 1 {
+		t.Fatalf("incorrect snapshot: %+v", s)
+	}
+	if len(s.Locations) != 1 || s.Locations[0] != "us-central1-a" {
+		t.Fatalf("pool did not inherit cluster locations: %v", s.Locations)
+	}
+	if s.Groups[0].TargetSize != 2 || !s.Groups[0].Stable || len(s.Groups[0].Instances) != 2 || s.Groups[0].Instances[1] != "gce://demo/us-central1-a/node-b" {
+		t.Fatalf("incorrect membership: %+v", s.Groups)
+	}
+	if s.Workloads[0].Ready != 2 || s.Workloads[0].UID != "rs-uid" {
+		t.Fatalf("incorrect workload: %+v", s.Workloads)
+	}
+	if nodePages.Load() != 2 || migPages.Load() != 2 || opPages.Load() != 2 || podPages.Load() != 2 {
+		t.Fatalf("pagination not exhausted: nodes %d MIG %d operations %d pods %d", nodePages.Load(), migPages.Load(), opPages.Load(), podPages.Load())
+	}
+}
+
+func TestSnapshotRejectsRecreatedCluster(t *testing.T) {
+	var calls atomic.Int32
+	c := fixtureClient(t, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		respond(t, w, map[string]any{"id": "different-cluster"})
+	})
+	_, err := c.Snapshot(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "identity changed") {
+		t.Fatalf("expected cluster identity rejection, got %v", err)
+	}
+	if calls.Load() != 1 {
+		t.Fatal("continued after cluster identity mismatch")
+	}
+}
+
 func TestMIGURLCannotRedirectCredentials(t *testing.T) {
 	var calls atomic.Int32
 	c := fixtureClient(t, func(w http.ResponseWriter, r *http.Request) { calls.Add(1); t.Error("unsafe URL reached HTTP client") })

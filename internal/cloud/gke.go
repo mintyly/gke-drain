@@ -3,6 +3,7 @@ package cloud
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"sort"
@@ -10,6 +11,84 @@ import (
 
 	"github.com/mintyly/gke-drain/internal/drain"
 )
+
+func (c *Client) Snapshot(ctx context.Context) (drain.Snapshot, error) {
+	s := drain.Snapshot{Resource: c.resource}
+	var cluster clusterJSON
+	if err := c.cloud(ctx, http.MethodGet, c.gkeBase+"/"+c.resource.ClusterPath(), nil, &cluster, true); err != nil {
+		return s, err
+	}
+	if cluster.ID == "" || cluster.ID != c.clusterID {
+		return s, errors.New("selected cluster identity changed; stop and create a new client/plan")
+	}
+	if cluster.Endpoint != c.endpoint || cluster.MasterAuth.ClusterCACertificate != c.ca {
+		return s, errors.New("selected cluster endpoint or CA changed; stop and reconnect before planning")
+	}
+	var pool poolJSON
+	if err := c.cloud(ctx, http.MethodGet, c.gkeBase+"/"+c.resource.PoolPath(), nil, &pool, true); err != nil {
+		return s, err
+	}
+	if pool.Name != c.resource.Pool {
+		return s, errors.New("GKE returned a different node pool")
+	}
+	s.ClusterID, s.ClusterStatus, s.PoolStatus = cluster.ID, cluster.Status, pool.Status
+	s.Autopilot = cluster.Autopilot.Enabled || pool.AutopilotConfig.Enabled
+	s.Autoscaling = pool.Autoscaling.Enabled || pool.Autoscaling.Autoprovisioned
+	if s.Autopilot {
+		return s, errors.New("Autopilot clusters and Autopilot-managed node pools are not supported")
+	}
+	s.Locations = pool.Locations
+	if len(s.Locations) == 0 {
+		s.Locations = cluster.Locations
+	}
+	busy, err := c.activeOperations(ctx)
+	if err != nil {
+		return s, err
+	}
+	s.Busy = busy
+	for _, raw := range pool.InstanceGroupURLs {
+		group, err := c.group(ctx, raw)
+		if err != nil {
+			return s, err
+		}
+		s.Groups = append(s.Groups, group)
+	}
+	s.Nodes, err = c.nodes(ctx)
+	if err != nil {
+		return s, err
+	}
+	// Read pods only for pool nodes. This avoids requiring unrelated namespaces'
+	// workload-controller read permissions while still finding every local pod.
+	for _, node := range s.Nodes {
+		pods, err := c.PodsOnNode(ctx, node.Name)
+		if err != nil {
+			return s, err
+		}
+		s.Pods = append(s.Pods, pods...)
+	}
+	refs := map[string]drain.Workload{}
+	for _, pod := range s.Pods {
+		if pod.Ignored() {
+			continue
+		}
+		if _, ok := workloadResource(pod.OwnerKind); !ok {
+			continue
+		}
+		key := pod.Namespace + "/" + pod.OwnerKind + "/" + pod.OwnerName
+		ref := drain.Workload{Namespace: pod.Namespace, Kind: pod.OwnerKind, Name: pod.OwnerName, UID: pod.OwnerUID}
+		if prior, ok := refs[key]; ok && prior.UID != ref.UID {
+			return s, fmt.Errorf("pods reference inconsistent controller UIDs for %s", key)
+		}
+		refs[key] = ref
+	}
+	ordered := make([]drain.Workload, 0, len(refs))
+	for _, ref := range refs {
+		ordered = append(ordered, ref)
+	}
+	sort.Slice(ordered, func(i, j int) bool { return workloadKey(ordered[i]) < workloadKey(ordered[j]) })
+	s.Workloads, err = c.Workloads(ctx, ordered)
+	return s, err
+}
 
 func (c *Client) activeOperations(ctx context.Context) (bool, error) {
 	page := ""
