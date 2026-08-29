@@ -137,6 +137,58 @@ func validObjectName(name string) bool {
 	return true
 }
 
+type patchOperation struct {
+	Op    string `json:"op"`
+	Path  string `json:"path"`
+	Value any    `json:"value,omitempty"`
+}
+
+func (c *Client) getNode(ctx context.Context, name string) (nodeJSON, error) {
+	var node nodeJSON
+	if !validObjectName(name) {
+		return node, errors.New("invalid Kubernetes node name")
+	}
+	err := c.kube(ctx, http.MethodGet, "/api/v1/nodes/"+name, "", nil, &node)
+	if err == nil && node.Metadata.Name != name {
+		return node, errors.New("Kubernetes returned a different node")
+	}
+	return node, err
+}
+
+func (c *Client) Cordon(ctx context.Context, node drain.Node, runID string) error {
+	if runID == "" {
+		return errors.New("cordon requires a nonempty run ID")
+	}
+	current, err := c.getNode(ctx, node.Name)
+	if err != nil {
+		return err
+	}
+	if current.Metadata.UID == "" || current.Metadata.UID != node.UID || current.Metadata.ResourceVersion == "" || current.Spec.ProviderID != node.ProviderID || current.Metadata.Labels["topology.kubernetes.io/zone"] != node.Zone {
+		return fmt.Errorf("node %s identity changed since planning; refusing stale cordon", node.Name)
+	}
+	if !toNode(current).Ready {
+		return fmt.Errorf("node %s is not Ready or is being deleted", node.Name)
+	}
+	if current.Metadata.Labels["cloud.google.com/gke-nodepool"] != c.resource.Pool {
+		return errors.New("cordon node is no longer in the selected pool")
+	}
+	if current.Spec.Unschedulable || current.Metadata.Annotations[drain.OwnershipAnnotation] != "" {
+		return fmt.Errorf("node %s is already cordoned or owned by another operation", node.Name)
+	}
+	annotations := current.Metadata.Annotations
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+	annotations[drain.OwnershipAnnotation] = runID
+	patch := []patchOperation{
+		{Op: "test", Path: "/metadata/uid", Value: current.Metadata.UID},
+		{Op: "test", Path: "/metadata/resourceVersion", Value: current.Metadata.ResourceVersion},
+		{Op: "add", Path: "/spec/unschedulable", Value: true},
+		{Op: "add", Path: "/metadata/annotations", Value: annotations},
+	}
+	return c.kube(ctx, http.MethodPatch, "/api/v1/nodes/"+node.Name, "application/json-patch+json", patch, nil)
+}
+
 func workloadResource(kind string) (string, bool) {
 	switch kind {
 	case "ReplicaSet":

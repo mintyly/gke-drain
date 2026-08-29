@@ -174,6 +174,71 @@ func TestMIGURLCannotRedirectCredentials(t *testing.T) {
 	}
 }
 
+func TestCordonRechecksIdentityAndUsesLatestResourceVersion(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		change  func(*nodeJSON)
+		wantErr bool
+	}{
+		{name: "heartbeat version changed"},
+		{name: "UID replaced", change: func(n *nodeJSON) { n.Metadata.UID = "new-uid" }, wantErr: true},
+		{name: "provider changed", change: func(n *nodeJSON) { n.Spec.ProviderID = "gce://demo/us-central1-a/replaced" }, wantErr: true},
+		{name: "zone changed", change: func(n *nodeJSON) { n.Metadata.Labels["topology.kubernetes.io/zone"] = "us-central1-b" }, wantErr: true},
+		{name: "pool changed", change: func(n *nodeJSON) { n.Metadata.Labels["cloud.google.com/gke-nodepool"] = "other" }, wantErr: true},
+		{name: "not Ready", change: func(n *nodeJSON) { n.Status.Conditions[0].Status = "False" }, wantErr: true},
+		{name: "already cordoned", change: func(n *nodeJSON) { n.Spec.Unschedulable = true }, wantErr: true},
+		{name: "foreign owner", change: func(n *nodeJSON) {
+			n.Metadata.Annotations = map[string]string{drain.OwnershipAnnotation: "someone-else"}
+		}, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			current := fixtureNode("node-a")
+			current.Metadata.Annotations = map[string]string{"keep": "yes"}
+			if tc.change != nil {
+				tc.change(&current)
+			}
+			var patches atomic.Int32
+			c := fixtureClient(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodGet {
+					respond(t, w, current)
+					return
+				}
+				patches.Add(1)
+				if r.Method != http.MethodPatch || r.Header.Get("Content-Type") != "application/json-patch+json" {
+					t.Errorf("unguarded mutation method/content type: %s %s", r.Method, r.Header.Get("Content-Type"))
+				}
+				var patch []patchOperation
+				if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+					t.Error(err)
+				}
+				if len(patch) != 4 || patch[0].Op != "test" || patch[0].Path != "/metadata/uid" || patch[0].Value != "uid-node-a" || patch[1].Path != "/metadata/resourceVersion" || patch[1].Value != "new-version" {
+					t.Errorf("missing latest UID/RV guards: %+v", patch)
+				}
+				if len(patch) == 4 {
+					annotations, _ := patch[3].Value.(map[string]any)
+					if annotations["keep"] != "yes" || annotations[drain.OwnershipAnnotation] != "run-1" {
+						t.Errorf("ownership or existing annotation lost: %v", annotations)
+					}
+				}
+				respond(t, w, map[string]any{})
+			})
+			planned := toNode(fixtureNode("node-a"))
+			planned.ResourceVersion = "old-version"
+			err := c.Cordon(context.Background(), planned, "run-1")
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Cordon error %v, wantErr %v", err, tc.wantErr)
+			}
+			want := int32(1)
+			if tc.wantErr {
+				want = 0
+			}
+			if patches.Load() != want {
+				t.Fatalf("patch count %d, want %d", patches.Load(), want)
+			}
+		})
+	}
+}
+
 func TestWorkloadsRejectControllerRecreation(t *testing.T) {
 	c := fixtureClient(t, func(w http.ResponseWriter, r *http.Request) {
 		respond(t, w, map[string]any{"metadata": map[string]string{"name": "web", "namespace": "default", "uid": "replacement-uid"}, "spec": map[string]int{"replicas": 2}, "status": map[string]int{"readyReplicas": 2}})
