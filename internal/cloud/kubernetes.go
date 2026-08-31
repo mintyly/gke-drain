@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strings"
 
 	"github.com/mintyly/gke-drain/internal/drain"
 )
@@ -185,6 +186,37 @@ func (c *Client) Cordon(ctx context.Context, node drain.Node, runID string) erro
 		{Op: "test", Path: "/metadata/resourceVersion", Value: current.Metadata.ResourceVersion},
 		{Op: "add", Path: "/spec/unschedulable", Value: true},
 		{Op: "add", Path: "/metadata/annotations", Value: annotations},
+	}
+	return c.kube(ctx, http.MethodPatch, "/api/v1/nodes/"+node.Name, "application/json-patch+json", patch, nil)
+}
+
+func (c *Client) Uncordon(ctx context.Context, node drain.Node, runID string) error {
+	if runID == "" {
+		return errors.New("uncordon requires a nonempty run ID")
+	}
+	current, err := c.getNode(ctx, node.Name)
+	if errors.Is(err, drain.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if current.Metadata.UID != node.UID {
+		return fmt.Errorf("node %s was replaced; leaving it unchanged", node.Name)
+	}
+	if current.Metadata.Annotations[drain.OwnershipAnnotation] != runID {
+		return fmt.Errorf("node %s is not owned by this run; leaving it unchanged", node.Name)
+	}
+	if current.Metadata.ResourceVersion == "" {
+		return errors.New("node resourceVersion missing; refusing unguarded uncordon")
+	}
+	ownerPath := "/metadata/annotations/" + strings.ReplaceAll(strings.ReplaceAll(drain.OwnershipAnnotation, "~", "~0"), "/", "~1")
+	patch := []patchOperation{
+		{Op: "test", Path: "/metadata/uid", Value: current.Metadata.UID},
+		{Op: "test", Path: "/metadata/resourceVersion", Value: current.Metadata.ResourceVersion},
+		{Op: "test", Path: ownerPath, Value: runID},
+		{Op: "add", Path: "/spec/unschedulable", Value: false},
+		{Op: "remove", Path: ownerPath},
 	}
 	return c.kube(ctx, http.MethodPatch, "/api/v1/nodes/"+node.Name, "application/json-patch+json", patch, nil)
 }

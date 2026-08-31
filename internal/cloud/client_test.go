@@ -239,6 +239,56 @@ func TestCordonRechecksIdentityAndUsesLatestResourceVersion(t *testing.T) {
 	}
 }
 
+func TestUncordonNeverTouchesAnotherRunsCordon(t *testing.T) {
+	for _, tc := range []struct {
+		name, owner, uid string
+		missing, wantErr bool
+	}{
+		{name: "own node", owner: "run-1", uid: "uid-node-a"},
+		{name: "another run", owner: "someone-else", uid: "uid-node-a", wantErr: true},
+		{name: "recreated node", owner: "run-1", uid: "different-uid", wantErr: true},
+		{name: "already removed", missing: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var patches atomic.Int32
+			c := fixtureClient(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodGet {
+					if tc.missing {
+						http.NotFound(w, r)
+						return
+					}
+					node := fixtureNode("node-a")
+					node.Metadata.UID = tc.uid
+					node.Spec.Unschedulable = true
+					node.Metadata.Annotations = map[string]string{drain.OwnershipAnnotation: tc.owner}
+					respond(t, w, node)
+					return
+				}
+				patches.Add(1)
+				var patch []map[string]any
+				if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+					t.Error(err)
+				}
+				if len(patch) != 5 || patch[2]["op"] != "test" || patch[2]["path"] != "/metadata/annotations/gke-drain.mintyly.dev~1run-id" || patch[2]["value"] != "run-1" || patch[3]["value"] != false {
+					t.Errorf("unsafe uncordon patch: %v", patch)
+				}
+				respond(t, w, map[string]any{})
+			})
+			err := c.Uncordon(context.Background(), toNode(fixtureNode("node-a")), "run-1")
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("error %v, wantErr %v", err, tc.wantErr)
+			}
+			want := int32(1)
+			if tc.missing || tc.wantErr {
+				want = 0
+			}
+			if patches.Load() != want {
+				t.Fatalf("patch count %d, want %d", patches.Load(), want)
+			}
+		})
+	}
+}
+
 func TestWorkloadsRejectControllerRecreation(t *testing.T) {
 	c := fixtureClient(t, func(w http.ResponseWriter, r *http.Request) {
 		respond(t, w, map[string]any{"metadata": map[string]string{"name": "web", "namespace": "default", "uid": "replacement-uid"}, "spec": map[string]int{"replicas": 2}, "status": map[string]int{"readyReplicas": 2}})
