@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -284,6 +285,47 @@ func TestUncordonNeverTouchesAnotherRunsCordon(t *testing.T) {
 			}
 			if patches.Load() != want {
 				t.Fatalf("patch count %d, want %d", patches.Load(), want)
+			}
+		})
+	}
+}
+
+func TestEvictionUsesUIDNeverDeletesAndOnlyRetries429(t *testing.T) {
+	for _, code := range []int{200, 404, 409, 429, 500, 502, 503, 504} {
+		t.Run(fmt.Sprint(code), func(t *testing.T) {
+			var calls atomic.Int32
+			c := fixtureClient(t, func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				if r.Method != http.MethodPost || r.URL.Path != "/api/v1/namespaces/default/pods/web-1/eviction" {
+					t.Errorf("unexpected destructive request: %s %s", r.Method, r.URL.Path)
+				}
+				var body struct {
+					APIVersion    string `json:"apiVersion"`
+					DeleteOptions struct {
+						Preconditions map[string]string `json:"preconditions"`
+					} `json:"deleteOptions"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Error(err)
+				}
+				if body.APIVersion != "policy/v1" || body.DeleteOptions.Preconditions["uid"] != "uid-web-1" {
+					t.Errorf("missing eviction API or UID precondition: %+v", body)
+				}
+				w.WriteHeader(code)
+				respond(t, w, map[string]string{"message": "test budget response"})
+			})
+			err := c.Evict(context.Background(), toPod(fixturePod("web-1", "node-a")))
+			if errors.Is(err, drain.ErrRetryable) != (code == 429) {
+				t.Errorf("retryable %v for %d: %v", errors.Is(err, drain.ErrRetryable), code, err)
+			}
+			if errors.Is(err, drain.ErrNotFound) != (code == 404) {
+				t.Errorf("notfound %v for %d", errors.Is(err, drain.ErrNotFound), code)
+			}
+			if (err == nil) != (code == 200) {
+				t.Errorf("error %v for code %d", err, code)
+			}
+			if calls.Load() != 1 {
+				t.Errorf("mutation retried %d times", calls.Load())
 			}
 		})
 	}

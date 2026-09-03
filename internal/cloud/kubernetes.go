@@ -221,6 +221,29 @@ func (c *Client) Uncordon(ctx context.Context, node drain.Node, runID string) er
 	return c.kube(ctx, http.MethodPatch, "/api/v1/nodes/"+node.Name, "application/json-patch+json", patch, nil)
 }
 
+func (c *Client) Evict(ctx context.Context, pod drain.Pod) error {
+	if !validObjectName(pod.Name) || !validObjectName(pod.Namespace) || pod.UID == "" {
+		return errors.New("eviction requires pod namespace, name, and UID")
+	}
+	body := struct {
+		APIVersion    string            `json:"apiVersion"`
+		Kind          string            `json:"kind"`
+		Metadata      map[string]string `json:"metadata"`
+		DeleteOptions struct {
+			Preconditions map[string]string `json:"preconditions"`
+		} `json:"deleteOptions"`
+	}{APIVersion: "policy/v1", Kind: "Eviction", Metadata: map[string]string{"name": pod.Name, "namespace": pod.Namespace}}
+	body.DeleteOptions.Preconditions = map[string]string{"uid": pod.UID}
+	err := c.kube(ctx, http.MethodPost, "/api/v1/namespaces/"+pod.Namespace+"/pods/"+pod.Name+"/eviction", "application/json", body, nil)
+	var ae *apiError
+	// Only 429 is retryable by the drain loop. In particular, 500 can mean
+	// overlapping PDBs and must not become an endless budget retry or DELETE.
+	if errors.As(err, &ae) && ae.Code != 429 && ae.Code != 404 {
+		return fmt.Errorf("eviction rejected: %s", ae.Error())
+	}
+	return err
+}
+
 func workloadResource(kind string) (string, bool) {
 	switch kind {
 	case "ReplicaSet":
