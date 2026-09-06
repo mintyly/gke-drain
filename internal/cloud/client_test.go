@@ -331,6 +331,30 @@ func TestEvictionUsesUIDNeverDeletesAndOnlyRetries429(t *testing.T) {
 	}
 }
 
+func TestResizeDoesNotRetryAmbiguousMutation(t *testing.T) {
+	var calls atomic.Int32
+	c := fixtureClient(t, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, ":setSize") {
+			t.Errorf("wrong resize request %s %s", r.Method, r.URL.Path)
+		}
+		var body map[string]int
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body["nodeCount"] != 2 {
+			t.Errorf("wrong resize count %v", body)
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+		respond(t, w, map[string]any{"error": map[string]string{"message": "backend unavailable"}})
+	})
+	_, err := c.Resize(context.Background(), 2)
+	if err == nil || !strings.Contains(err.Error(), "outcome may be unknown") {
+		t.Fatalf("missing uncertainty error: %v", err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("non-idempotent resize retried: %d", calls.Load())
+	}
+}
+
 func TestWorkloadsRejectControllerRecreation(t *testing.T) {
 	c := fixtureClient(t, func(w http.ResponseWriter, r *http.Request) {
 		respond(t, w, map[string]any{"metadata": map[string]string{"name": "web", "namespace": "default", "uid": "replacement-uid"}, "spec": map[string]int{"replicas": 2}, "status": map[string]int{"readyReplicas": 2}})

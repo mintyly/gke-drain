@@ -201,6 +201,57 @@ func (c *Client) group(ctx context.Context, raw string) (drain.Group, error) {
 	return g, nil
 }
 
+func (c *Client) Resize(ctx context.Context, count int) (string, error) {
+	if count < 0 {
+		return "", errors.New("node count cannot be negative")
+	}
+	var op operationJSON
+	err := c.cloud(ctx, http.MethodPost, c.gkeBase+"/"+c.resource.PoolPath()+":setSize", struct {
+		NodeCount int `json:"nodeCount"`
+	}{count}, &op, false)
+	if err != nil {
+		return "", fmt.Errorf("GKE resize submission failed; outcome may be unknown, inspect GKE operations before retrying: %w", err)
+	}
+	if err := c.checkOperationScope(op); err != nil {
+		return "", fmt.Errorf("GKE resize response could not be verified; inspect operations before retrying: %w", err)
+	}
+	name, err := c.operationName(op.Name)
+	if err != nil {
+		return "", err
+	}
+	return name, nil
+}
+
+func (c *Client) operationName(name string) (string, error) {
+	prefix := "projects/" + c.resource.Project + "/locations/" + c.resource.Location + "/operations/"
+	if strings.HasPrefix(name, prefix) {
+		name = strings.TrimPrefix(name, prefix)
+	}
+	if !identifier.MatchString(name) {
+		return "", errors.New("GKE returned an invalid or differently scoped operation name")
+	}
+	return prefix + name, nil
+}
+
+func (c *Client) checkOperationScope(op operationJSON) error {
+	if _, err := c.operationName(op.Name); err != nil {
+		return err
+	}
+	if op.Location != "" && op.Location != c.resource.Location {
+		return errors.New("GKE operation location differs from the selected cluster")
+	}
+	if op.Zone != "" && op.Zone != c.resource.Location {
+		return errors.New("GKE operation zone differs from the selected cluster")
+	}
+	if op.TargetLink != "" {
+		project, location, cluster, pool, err := parseGKETarget(op.TargetLink)
+		if err != nil || project != c.resource.Project || location != c.resource.Location || cluster != c.resource.Cluster || (pool != "" && pool != c.resource.Pool) {
+			return errors.New("GKE operation target differs from the selected node pool")
+		}
+	}
+	return nil
+}
+
 // GKE can return legacy /zones/ links even for calls through /locations/. A
 // cluster-level operation target also belongs to this request's scope.
 func parseGKETarget(raw string) (project, location, cluster, pool string, err error) {
