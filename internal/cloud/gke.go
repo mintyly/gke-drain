@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/mintyly/gke-drain/internal/drain"
 )
@@ -270,4 +271,42 @@ func parseGKETarget(raw string) (project, location, cluster, pool string, err er
 		pool = parts[8]
 	}
 	return parts[2], parts[4], parts[6], pool, nil
+}
+
+func (c *Client) WaitOperation(ctx context.Context, name string, interval time.Duration) error {
+	canonical, err := c.operationName(name)
+	if err != nil {
+		return err
+	}
+	if interval <= 0 {
+		interval = time.Second
+	}
+	for {
+		var op operationJSON
+		if err := c.cloud(ctx, http.MethodGet, c.gkeBase+"/"+canonical, nil, &op, true); err != nil {
+			return fmt.Errorf("poll GKE operation %s: %w", canonical, err)
+		}
+		if err := c.checkOperationScope(op); err != nil {
+			return err
+		}
+		returned, err := c.operationName(op.Name)
+		if err != nil {
+			return err
+		}
+		if returned != canonical {
+			return errors.New("GKE returned a different operation while polling")
+		}
+		if op.Status == "DONE" {
+			if op.Error != nil && (op.Error.Code != 0 || op.Error.Message != "") {
+				return fmt.Errorf("GKE operation failed (code %d): %s; %s", op.Error.Code, shortMessage(op.Error.Message), shortMessage(op.StatusMessage))
+			}
+			return nil
+		}
+		if op.Status != "PENDING" && op.Status != "RUNNING" && op.Status != "ABORTING" {
+			return fmt.Errorf("GKE operation has unexpected status %q: %s", shortMessage(op.Status), shortMessage(op.StatusMessage))
+		}
+		if err := sleep(ctx, interval); err != nil {
+			return fmt.Errorf("GKE operation %s may still be running: %w", canonical, err)
+		}
+	}
 }

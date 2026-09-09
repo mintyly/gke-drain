@@ -45,6 +45,8 @@ type Client struct {
 	quota       string
 }
 
+var _ drain.Backend = (*Client)(nil)
+
 // New resolves Application Default Credentials and obtains the selected
 // cluster's connection information from the authenticated GKE API.
 func New(ctx context.Context, resource drain.Resource) (*Client, error) {

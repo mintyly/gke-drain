@@ -355,6 +355,42 @@ func TestResizeDoesNotRetryAmbiguousMutation(t *testing.T) {
 	}
 }
 
+func TestOperationPollReportsFailureAndValidatesScope(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		op   operationJSON
+		want string
+	}{
+		{name: "failed done", op: operationJSON{Name: "operation-1", Status: "DONE", StatusMessage: "quota failed", Error: &struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		}{Code: 8, Message: "resource exhausted"}}, want: "resource exhausted"},
+		{name: "foreign target", op: operationJSON{Name: "operation-1", Status: "DONE", TargetLink: "https://container.googleapis.com/v1/projects/other/locations/us-central1-a/clusters/demo/nodePools/workers"}, want: "target differs"},
+		{name: "wrong operation", op: operationJSON{Name: "operation-2", Status: "DONE"}, want: "different operation"},
+		{name: "invalid status", op: operationJSON{Name: "operation-1", Status: "UNKNOWN"}, want: "unexpected status"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := fixtureClient(t, func(w http.ResponseWriter, r *http.Request) { respond(t, w, tc.op) })
+			err := c.WaitOperation(context.Background(), "operation-1", time.Millisecond)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected %q, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
+func TestOperationPollingHonorsCancellation(t *testing.T) {
+	c := fixtureClient(t, func(w http.ResponseWriter, r *http.Request) {
+		respond(t, w, operationJSON{Name: "operation-1", Status: "RUNNING"})
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	err := c.WaitOperation(ctx, "operation-1", time.Second)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("lost operation cancellation: %v", err)
+	}
+}
+
 func TestWorkloadsRejectControllerRecreation(t *testing.T) {
 	c := fixtureClient(t, func(w http.ResponseWriter, r *http.Request) {
 		respond(t, w, map[string]any{"metadata": map[string]string{"name": "web", "namespace": "default", "uid": "replacement-uid"}, "spec": map[string]int{"replicas": 2}, "status": map[string]int{"readyReplicas": 2}})
