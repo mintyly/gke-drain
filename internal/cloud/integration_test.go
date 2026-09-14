@@ -17,7 +17,7 @@ import (
 // control planes. It catches contract mismatches that separate backend/domain
 // mocks cannot, while making no requests to Google Cloud.
 func TestRunnerThroughRESTControlPlanes(t *testing.T) {
-	for _, scenario := range []string{"healthy resize"} {
+	for _, scenario := range []string{"healthy resize", "PDB blocks resize"} {
 		t.Run(scenario, func(t *testing.T) {
 			var mu sync.Mutex
 			nodes := map[string]nodeJSON{}
@@ -109,6 +109,11 @@ func TestRunnerThroughRESTControlPlanes(t *testing.T) {
 					if r.Method != http.MethodPost {
 						t.Errorf("eviction used %s", r.Method)
 					}
+					if scenario == "PDB blocks resize" {
+						w.WriteHeader(http.StatusTooManyRequests)
+						respond(t, w, map[string]string{"message": "eviction would violate disruption budget"})
+						return
+					}
 					parts := strings.Split(r.URL.Path, "/")
 					name := parts[len(parts)-2]
 					delete(pods, name)
@@ -137,6 +142,9 @@ func TestRunnerThroughRESTControlPlanes(t *testing.T) {
 			opts := drain.DefaultOptions()
 			opts.TargetPerZone, opts.PollInterval = 2, time.Millisecond
 			opts.DrainTimeout, opts.OperationTimeout = time.Second, time.Second
+			if scenario == "PDB blocks resize" {
+				opts.DrainTimeout = 100 * time.Millisecond
+			}
 			snapshot, err := c.Snapshot(context.Background())
 			if err != nil {
 				t.Fatal(err)
@@ -166,6 +174,10 @@ func TestRunnerThroughRESTControlPlanes(t *testing.T) {
 			case "healthy resize":
 				if err != nil || resizes != 1 || strings.Join(surviving, ",") != "node-b,node-c" {
 					t.Fatalf("err=%v resizes=%d nodes=%v", err, resizes, surviving)
+				}
+			case "PDB blocks resize":
+				if err == nil || resizes != 0 || len(nodes) != 3 || cleanups != 1 {
+					t.Fatalf("err=%v resizes=%d nodes=%v cleanups=%d", err, resizes, surviving, cleanups)
 				}
 			}
 		})
