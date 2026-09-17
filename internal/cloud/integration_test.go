@@ -17,7 +17,7 @@ import (
 // control planes. It catches contract mismatches that separate backend/domain
 // mocks cannot, while making no requests to Google Cloud.
 func TestRunnerThroughRESTControlPlanes(t *testing.T) {
-	for _, scenario := range []string{"healthy resize", "PDB blocks resize"} {
+	for _, scenario := range []string{"healthy resize", "PDB blocks resize", "GKE removes another node"} {
 		t.Run(scenario, func(t *testing.T) {
 			var mu sync.Mutex
 			nodes := map[string]nodeJSON{}
@@ -130,6 +130,15 @@ func TestRunnerThroughRESTControlPlanes(t *testing.T) {
 						t.Errorf("wrong final size: %v", body)
 					}
 					victim := "node-a"
+					if scenario == "GKE removes another node" {
+						victim = "node-b"
+						for name, pod := range pods {
+							if pod.Spec.NodeName == victim {
+								pod.Spec.NodeName = "node-c"
+								pods[name] = pod
+							}
+						}
+					}
 					delete(nodes, victim)
 					respond(t, w, operation)
 				case r.URL.Path == "/gke/projects/demo/locations/us-central1-a/operations/operation-resize":
@@ -178,6 +187,10 @@ func TestRunnerThroughRESTControlPlanes(t *testing.T) {
 			case "PDB blocks resize":
 				if err == nil || resizes != 0 || len(nodes) != 3 || cleanups != 1 {
 					t.Fatalf("err=%v resizes=%d nodes=%v cleanups=%d", err, resizes, surviving, cleanups)
+				}
+			case "GKE removes another node":
+				if err == nil || !strings.Contains(err.Error(), "different victims") || resizes != 1 || cleanups != 1 {
+					t.Fatalf("err=%v resizes=%d cleanups=%d", err, resizes, cleanups)
 				}
 			}
 		})
