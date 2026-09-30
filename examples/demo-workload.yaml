@@ -1,0 +1,74 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gke-drain-demo
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: drain-demo
+  namespace: gke-drain-demo
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: drain-demo
+  template:
+    metadata:
+      labels:
+        app: drain-demo
+    spec:
+      nodeSelector:
+        cloud.google.com/gke-nodepool: workers
+      terminationGracePeriodSeconds: 30
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: drain-demo
+      containers:
+        - name: nginx
+          image: nginx:1.28-alpine
+          ports:
+            - name: http
+              containerPort: 80
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 2
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: drain-demo
+  namespace: gke-drain-demo
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: drain-demo
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: drain-demo
+  namespace: gke-drain-demo
+spec:
+  type: ClusterIP
+  selector:
+    app: drain-demo
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
