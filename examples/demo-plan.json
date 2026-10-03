@@ -1,0 +1,84 @@
+{
+  "schemaVersion": "v1",
+  "resource": {
+    "project": "demo-project",
+    "location": "asia-southeast1",
+    "cluster": "demo-cluster",
+    "nodePool": "workers"
+  },
+  "clusterID": "synthetic-demo-cluster",
+  "fingerprint": "4899a6b23cb93dfe0d063690cfb422a684d92f5ac7c4c766a53c76f6e01b2bc8",
+  "currentPerZone": 3,
+  "targetPerZone": 1,
+  "zones": [
+    "asia-southeast1-a",
+    "asia-southeast1-b"
+  ],
+  "totalBefore": 6,
+  "totalAfter": 2,
+  "batches": [
+    {
+      "number": 1,
+      "beforePerZone": 3,
+      "afterPerZone": 2,
+      "preferredDrainCandidates": [
+        {
+          "name": "gke-demo-workers-a-0",
+          "uid": "uid-gke-demo-workers-a-0",
+          "resourceVersion": "1",
+          "zone": "asia-southeast1-a",
+          "providerID": "gce://demo-project/asia-southeast1-a/gke-demo-workers-a-0",
+          "machineType": "e2-standard-2",
+          "createdAt": "2026-10-01T00:00:00Z",
+          "ready": true,
+          "unschedulable": false
+        },
+        {
+          "name": "gke-demo-workers-b-0",
+          "uid": "uid-gke-demo-workers-b-0",
+          "resourceVersion": "1",
+          "zone": "asia-southeast1-b",
+          "providerID": "gce://demo-project/asia-southeast1-b/gke-demo-workers-b-0",
+          "machineType": "e2-standard-2",
+          "createdAt": "2026-10-01T00:00:00Z",
+          "ready": true,
+          "unschedulable": false
+        }
+      ]
+    },
+    {
+      "number": 2,
+      "beforePerZone": 2,
+      "afterPerZone": 1,
+      "preferredDrainCandidates": [
+        {
+          "name": "gke-demo-workers-a-1",
+          "uid": "uid-gke-demo-workers-a-1",
+          "resourceVersion": "1",
+          "zone": "asia-southeast1-a",
+          "providerID": "gce://demo-project/asia-southeast1-a/gke-demo-workers-a-1",
+          "machineType": "e2-standard-2",
+          "createdAt": "2026-10-02T00:00:00Z",
+          "ready": true,
+          "unschedulable": false
+        },
+        {
+          "name": "gke-demo-workers-b-1",
+          "uid": "uid-gke-demo-workers-b-1",
+          "resourceVersion": "1",
+          "zone": "asia-southeast1-b",
+          "providerID": "gce://demo-project/asia-southeast1-b/gke-demo-workers-b-1",
+          "machineType": "e2-standard-2",
+          "createdAt": "2026-10-02T00:00:00Z",
+          "ready": true,
+          "unschedulable": false
+        }
+      ]
+    }
+  ],
+  "warnings": [
+    "GKE setSize chooses which nodes to remove; preferred drain candidates are not a victim-selection guarantee.",
+    "A blocked Kubernetes eviction prevents resize submission. Once submitted, GKE can honor PodDisruptionBudgets and graceful termination for only up to one hour before completing the resize.",
+    "Batch size and target size are per zone: each resize applies across every node-pool zone."
+  ]
+}
