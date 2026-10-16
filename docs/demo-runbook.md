@@ -95,3 +95,39 @@ After completion, compare old and new Node UIDs, each zone's node count, the rep
 
 An independent request probe through your chosen test traffic path is needed for an availability measurement. Pod readiness alone does not establish that no request failed.
 
+## 5. Exercise a blocked eviction
+
+Use a fresh sandbox state and verify that a candidate hosts a demo Pod. Record its PDB's current configuration, then set `minAvailable` to three for the three-replica deployment:
+
+```sh
+kubectl --context=EXPECTED_CONTEXT -n gke-drain-demo \
+  patch pdb drain-demo --type=merge -p '{"spec":{"minAvailable":3}}'
+```
+
+Plan a valid reduction from that fresh state, then execute it with a short `--drain-timeout`, for example `30s`. Expected behaviour: the admission rejection is retried until the deadline, the command exits nonzero, and no GKE resize is submitted for the blocked batch. The tool attempts to restore its cordons. If the selected candidates contain no protected demo Pods, this setup has not tested a PDB block.
+
+Restore the PDB to `minAvailable: 2` after recording the result. Do not use this experiment on a shared or production workload.
+
+## 6. Record evidence
+
+Fill the final column only from an actual run. Keep timestamps and sanitized logs alongside the tested commit and GKE version.
+
+| Scenario | Expected observation | Actual observation |
+| --- | --- | --- |
+| Offline plan | Per-zone arithmetic and deterministic preferred candidates | |
+| Preview against GKE | No node patch, eviction, or resize request | |
+| Healthy one-batch reduction | Target observed in every zone; controller readiness recovered | |
+| Preferred-node mismatch, if encountered | Report actual difference; stop further batches | |
+| PDB blocks candidate | Nonzero exit; no resize for blocked batch; owned-cordon cleanup attempted | |
+| Cancellation before resize | No subsequent resize; cleanup outcome visible | |
+| Live application probe | Record count, duration, and failed requests without assuming zero | |
+
+Useful measurements include time spent draining, time waiting for GKE, initial/final nodes per zone, candidate versus removed UIDs, readiness recovery time, and request failures. Report the workload and resource sizes with any timing; a sandbox result is not a general production benchmark.
+
+## 7. Clean up the experiment
+
+Remove the resources in `examples/demo-workload.yaml` from the explicit sandbox context when finished. If you created a dedicated cluster/project, delete only those experiment resources through your normal Google Cloud cleanup process and verify that billable resources are gone. Retain sanitized evidence, not ADC files, access tokens, kubeconfig credentials, or private endpoints.
+
+## What to explain in a technical walkthrough
+
+Start with the cloud/Kubernetes coordination problem. Show a plan and one failure-path test. Then explain why native `setSize` cannot guarantee a chosen victim, why an ambiguous response must not trigger automatic retries, why a regional target is per zone, and how ownership guards constrain cleanup. Finish with the live evidence you actually collected and the limitations that remain.
